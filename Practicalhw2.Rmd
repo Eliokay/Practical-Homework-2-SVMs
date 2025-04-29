@@ -1,0 +1,163 @@
+---
+title: "Practical Homework 2"
+author: "Eloho Okoloko"
+date: "2025-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load Libraries
+```{r}
+library(e1071)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(reshape2)
+library(kernlab)
+```
+
+# Load Data
+```{r}
+data <- read.csv("C:/Users/eokoloko/Downloads/nhis_2022.csv")
+head(data)
+
+```
+
+# Filter and preprocess Data
+```{r}
+data <- data %>% filter(AGE >= 18) # I'm only interested in adults(18 and above)
+vars <- data %>% select(CANCEREV, HRSLEEP, VIG10DMIN, BMICALC, HOURSWRK, VEGENO)
+cleaned_vars <- vars %>%
+  filter(
+    CANCEREV %in% c(1, 2),
+    !HRSLEEP %in% c(97, 98, 99),
+    !VIG10DMIN %in% c(997, 998, 999),
+    !BMICALC %in% c(996),
+    !HOURSWRK %in% c(97, 98, 99),
+    !VEGENO %in% c(996, 997, 998)
+  ) #this gets rid of responses i am not interested in and retains only the important values
+
+cleaned_vars$CANCEREV <- factor(cleaned_vars$CANCEREV, levels=c(2, 1), labels=c("Yes", "No")) #recode the cancer variable and make yes the positive class
+
+scaled_vars <- cleaned_vars
+scaled_vars[,2:6] <- scale(cleaned_vars[,2:6]) # this will standardize predictors
+```
+
+# Train-Test Split
+```{r}
+set.seed(123)
+train_index <- createDataPartition(scaled_vars$CANCER, p=0.8, list=FALSE)
+train_data <- scaled_vars[train_index,]
+test_data <- scaled_vars[-train_index,]
+```
+
+# Linear SVM
+```{r}
+set.seed(1)
+linear_svm <- svm(CANCEREV ~ ., data=train_data, kernel="linear", cost=1, probability=TRUE, class.weights=c("No"=1, "Yes"=5)) #I used class.weight to solve class imbalance issue.
+linear_preds <- predict(linear_svm, test_data)
+cm_linear <- confusionMatrix(linear_preds, test_data$CANCER)
+cm_linear
+```
+# After treating for class imbalance, the model accuracy dropped from an 87% to a 58%... The model had high accuracy before because it mainly had to predict No which makes up more than 80% of the dataset. 
+
+
+# Radial SVM with hyperparameter Tuning
+```{r}
+control <- trainControl(method="cv", number=5)
+grid_radial <- expand.grid(C=c(0.1, 1, 10), sigma=c(0.001, 0.01, 0.1))
+
+set.seed(123)
+radial_tuned <- train(CANCEREV ~ ., data=train_data,
+                      method="svmRadial",
+                      trControl=control,
+                      tuneGrid=grid_radial,
+                      preProcess=NULL,
+                      class.weights=c("No"=1, "Yes"=5))
+
+radial_preds <- predict(radial_tuned, newdata=test_data)
+cm_radial <- confusionMatrix(radial_preds, test_data$CANCEREV)
+cm_radial
+```
+
+
+# Polynomial SVM with hyperparameter tuning - didnt run this due to time constrains, it was taking too long.
+#grid_poly <- expand.grid(C=c(0.1, 1, 10), degree=c(2, 3, 4), scale=1)
+
+#set.seed(123)
+#poly_tuned <- train(CANCEREV ~ ., data=train_data,
+                    method="svmPoly",
+                    trControl=control,
+                    tuneGrid=grid_poly,
+                    preProcess=NULL,
+                    class.weights=c("No"=1, "Yes"=5))
+
+#poly_preds <- predict(poly_tuned, test_data)
+#cm_poly <- confusionMatrix(poly_preds, test_data$CANCEREV)
+#cm_poly
+
+
+# Polynomial SVM without hyperparameter tuning using default setting
+```{r}
+set.seed(1)
+poly_svm <- svm(CANCEREV ~ ., 
+                data = train_data, 
+                kernel = "polynomial", 
+                degree = 3,        
+                cost = 1,          
+                probability = TRUE,
+                class.weights = c("No"=1, "Yes"=5)) 
+poly_preds <- predict(poly_svm, newdata = test_data)
+cm_poly <- confusionMatrix(poly_preds, test_data$CANCEREV)
+cm_poly
+```
+
+
+
+# Data Visualization
+
+#Accuracy of models
+```{r}
+accuracies <- c(cm_linear$overall['Accuracy'], cm_radial$overall['Accuracy'], cm_poly$overall['Accuracy']) * 100
+model_names <- c("Linear SVM", "Radial SVM", "Polynomial SVM")
+accuracy_df <- data.frame(Model=model_names, Accuracy=accuracies)
+
+ggplot(accuracy_df, aes(x=Model, y=Accuracy)) +
+  geom_bar(stat="identity", fill="skyblue", color="black") +
+  geom_text(aes(label=sprintf("%.1f%%", Accuracy)), vjust=-0.5) +
+  ylim(60, 100) +
+  labs(title="Cancer Prediction: Test Accuracy Comparison", y="Test Accuracy (%)") +
+  theme_minimal()
+```
+
+#Decision Boundary (BMI VS HRSLEEP)
+```{r}
+plot_data <- train_data %>% select(CANCEREV, BMICALC, HRSLEEP)
+svm_2d <- svm(CANCEREV ~ BMICALC + HRSLEEP, data=plot_data, kernel="linear", cost=1,
+              class.weights=c("No"=1, "Yes"=5))
+
+xrange <- seq(min(plot_data$BMICALC), max(plot_data$BMICALC), length.out=100)
+yrange <- seq(min(plot_data$HRSLEEP), max(plot_data$HRSLEEP), length.out=100)
+grid <- expand.grid(BMICALC=xrange, HRSLEEP=yrange)
+grid$pred <- predict(svm_2d, grid)
+
+ggplot() +
+  geom_point(data=plot_data, aes(x=BMICALC, y=HRSLEEP, color=CANCEREV), alpha=0.7) +
+  geom_contour(data=grid, aes(x=BMICALC, y=HRSLEEP, z=as.numeric(pred)), breaks=1.5, color="black") +
+  labs(title="Cancer Prediction: SVM Decision Boundary", x="BMI", y="Hours of Sleep") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+
